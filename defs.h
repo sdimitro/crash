@@ -763,6 +763,7 @@ struct kernel_table {                   /* kernel data */
 	} vmcoreinfo;
 	ulonglong flags2;
 	char *source_tree;
+	struct timespec boot_date;
 };
 
 /*
@@ -3030,7 +3031,7 @@ typedef u64 pte_t;
 #define MACHINE_TYPE       "ARM64"    
 
 #define PTOV(X) \
-	((unsigned long)(X)-(machdep->machspec->phys_offset)+(machdep->machspec->page_offset))
+	((unsigned long)(X) - (machdep->machspec->physvirt_offset))
 
 #define VTOP(X)               arm64_VTOP((ulong)(X))
 
@@ -3280,6 +3281,8 @@ struct machine_specific {
 	ulong VA_BITS_ACTUAL;
 	ulong CONFIG_ARM64_VA_BITS;
 	ulong VA_START;
+	ulong CONFIG_ARM64_KERNELPACMASK;
+	ulong physvirt_offset;
 };
 
 struct arm64_stackframe {
@@ -5577,6 +5580,7 @@ void dump_log(int);
 #define SHOW_LOG_DICT  (0x2)
 #define SHOW_LOG_TEXT  (0x4)
 #define SHOW_LOG_AUDIT (0x8)
+#define SHOW_LOG_CTIME (0x10)
 void set_cpu(int);
 void clear_machdep_cache(void);
 struct stack_hook *gather_text_list(struct bt_info *);
