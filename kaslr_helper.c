@@ -394,10 +394,11 @@ quit:
 #define PTI_USER_PGTABLE_MASK	(1 << PTI_USER_PGTABLE_BIT)
 #define CR3_PCID_MASK		0xFFFull
 int
-calc_kaslr_offset(ulong *kaslr_offset, ulong *phys_base)
+calc_kaslr_offset(ulong *ko, ulong *pb)
 {
 	uint64_t cr3 = 0, idtr = 0, pgd = 0, idtr_paddr;
 	ulong divide_error_vmcore;
+	ulong kaslr_offset, phys_base;
 	ulong kaslr_offset_kdump, phys_base_kdump;
 	int ret = FALSE;
 	int verbose = CRASHDEBUG(1)? 1: 0;
@@ -405,6 +406,7 @@ calc_kaslr_offset(ulong *kaslr_offset, ulong *phys_base)
 	if (!machine_type("X86_64"))
 		return FALSE;
 
+retry:
 	if (SADUMP_DUMPFILE()) {
 		if (!sadump_get_cr3_idtr(&cr3, &idtr))
 			return FALSE;
@@ -436,18 +438,48 @@ calc_kaslr_offset(ulong *kaslr_offset, ulong *phys_base)
 	machdep->machspec->pgdir_shift = PGDIR_SHIFT;
 	machdep->machspec->ptrs_per_pgd = PTRS_PER_PGD;
 	if (!readmem(pgd, PHYSADDR, machdep->pgd, PAGESIZE(),
-			"pgd", RETURN_ON_ERROR))
-		goto quit;
+			"pgd", RETURN_ON_ERROR)) {
+		if (SADUMP_DUMPFILE())
+			goto retry;
+		else
+			goto quit;
+	}
 
 	/* Convert virtual address of IDT table to physical address */
-	if (!kvtop(NULL, idtr, &idtr_paddr, verbose))
-		goto quit;
+	if (!kvtop(NULL, idtr, &idtr_paddr, verbose)) {
+		if (SADUMP_DUMPFILE())
+			goto retry;
+		else
+			goto quit;
+	}
 
 	/* Now we can calculate kaslr_offset and phys_base */
 	divide_error_vmcore = get_vec0_addr(idtr_paddr);
-	*kaslr_offset = divide_error_vmcore - st->divide_error_vmlinux;
-	*phys_base = idtr_paddr -
-		(st->idt_table_vmlinux + *kaslr_offset - __START_KERNEL_map);
+	kaslr_offset = divide_error_vmcore - st->divide_error_vmlinux;
+	phys_base = idtr_paddr -
+		(st->idt_table_vmlinux + kaslr_offset - __START_KERNEL_map);
+
+	if (SADUMP_DUMPFILE()) {
+		char buf[sizeof("Linux version")];
+		ulong linux_banner_paddr;
+
+		if (!kvtop(NULL,
+			   st->linux_banner_vmlinux + kaslr_offset,
+			   &linux_banner_paddr,
+			   verbose))
+			goto retry;
+
+		if (!readmem(linux_banner_paddr,
+			     PHYSADDR,
+			     buf,
+			     sizeof(buf),
+			     "linux_banner",
+			     RETURN_ON_ERROR))
+			goto retry;
+
+		if (!STRNEQ(buf, "Linux version"))
+			goto retry;
+	}
 
 	if (CRASHDEBUG(1)) {
 		fprintf(fp, "calc_kaslr_offset: idtr=%lx\n", idtr);
@@ -465,9 +497,9 @@ calc_kaslr_offset(ulong *kaslr_offset, ulong *phys_base)
 	 * from vmcoreinfo
 	 */
 	if (get_kaslr_offset_from_vmcoreinfo(
-		*kaslr_offset, &kaslr_offset_kdump, &phys_base_kdump)) {
-		*kaslr_offset =  kaslr_offset_kdump;
-		*phys_base =  phys_base_kdump;
+		kaslr_offset, &kaslr_offset_kdump, &phys_base_kdump)) {
+		kaslr_offset =  kaslr_offset_kdump;
+		phys_base =  phys_base_kdump;
 	} else if (CRASHDEBUG(1)) {
 		fprintf(fp, "kaslr_helper: failed to determine which kernel was running at crash,\n");
 		fprintf(fp, "kaslr_helper: asssuming the kdump 1st kernel.\n");
@@ -475,9 +507,12 @@ calc_kaslr_offset(ulong *kaslr_offset, ulong *phys_base)
 
 	if (CRASHDEBUG(1)) {
 		fprintf(fp, "calc_kaslr_offset: kaslr_offset=%lx\n",
-			*kaslr_offset);
-		fprintf(fp, "calc_kaslr_offset: phys_base=%lx\n", *phys_base);
+			kaslr_offset);
+		fprintf(fp, "calc_kaslr_offset: phys_base=%lx\n", phys_base);
 	}
+
+	*ko = kaslr_offset;
+	*pb = phys_base;
 
 	ret = TRUE;
 quit:
