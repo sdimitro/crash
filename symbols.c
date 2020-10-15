@@ -3868,7 +3868,8 @@ is_shared_object(char *file)
 			break;
 
 		case EM_X86_64:
-			if (machine_type("X86_64") || machine_type("ARM64")) 
+			if (machine_type("X86_64") || machine_type("ARM64") ||
+			    machine_type("PPC64"))
 				return TRUE;
 			break;
 
@@ -10584,6 +10585,9 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(xa_node_slots));
 	fprintf(fp, "                 xa_node_shift: %ld\n",
 		OFFSET(xa_node_shift));
+
+	fprintf(fp, "            uts_namespace_name: %ld\n",
+		OFFSET(uts_namespace_name));
 
 	fprintf(fp, "\n                    size_table:\n");
 	fprintf(fp, "                          page: %ld\n", SIZE(page));
