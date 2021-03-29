@@ -356,9 +356,11 @@ x86_64_init(int when)
 			machdep->machspec->physical_mask_shift = __PHYSICAL_MASK_SHIFT_5LEVEL;
 			machdep->machspec->pgdir_shift = PGDIR_SHIFT_5LEVEL;
 			machdep->machspec->ptrs_per_pgd = PTRS_PER_PGD_5LEVEL;
-			if ((machdep->machspec->p4d = (char *)malloc(PAGESIZE())) == NULL)
-				error(FATAL, "cannot malloc p4d space.");
-			machdep->machspec->last_p4d_read = 0;
+			if (!machdep->machspec->p4d) {
+				if ((machdep->machspec->p4d = (char *)malloc(PAGESIZE())) == NULL)
+					error(FATAL, "cannot malloc p4d space.");
+				machdep->machspec->last_p4d_read = 0;
+			}
 			machdep->uvtop = x86_64_uvtop_level4;  /* 5-level is optional per-task */
 			machdep->kvbase = (ulong)PAGE_OFFSET;
 			machdep->identity_map_base = (ulong)PAGE_OFFSET;
@@ -1324,6 +1326,8 @@ x86_64_per_cpu_init(void)
 		    	    KVADDR, &hardirq_stack_ptr, sizeof(void *),
 		    	    "hardirq_stack_ptr (per_cpu)", QUIET|RETURN_ON_ERROR))
 				continue;
+			if (hardirq_stack_ptr != PAGEBASE(hardirq_stack_ptr))
+				hardirq_stack_ptr += 8;
 			ms->stkinfo.ibase[i] = hardirq_stack_ptr - ms->stkinfo.isize;
 		} else if (irq_sp)
 			ms->stkinfo.ibase[i] = irq_sp->value + kt->__per_cpu_offset[i];
@@ -1367,6 +1371,7 @@ x86_64_ist_init(void)
 	ulong init_tss;
 	struct machine_specific *ms;
 	struct syment *boot_sp, *tss_sp, *ist_sp;
+	char *exc_stack_struct_name = NULL;
 
         ms = machdep->machspec;
 	if (!(tss_sp = per_cpu_symbol_search("per_cpu__init_tss"))) {
@@ -1442,25 +1447,40 @@ x86_64_ist_init(void)
 		return;
 	}
 
-	if (MEMBER_EXISTS("exception_stacks", "NMI_stack")) {
+	if (MEMBER_EXISTS("cea_exception_stacks", "NMI_stack")) {
+		/* The effective cpu entry area mapping with guard pages. */
+		exc_stack_struct_name = "cea_exception_stacks";
+	} else if (MEMBER_EXISTS("exception_stacks", "NMI_stack")) {
+		/* The exception stacks' physical storage. No guard pages and no VC stack. */
+		exc_stack_struct_name = "exception_stacks";
+	}
+	if (exc_stack_struct_name) {
                 for (i = 0; i < MAX_EXCEPTION_STACKS; i++) {
 			if (STREQ(ms->stkinfo.exception_stacks[i], "DEBUG"))
-				ms->stkinfo.esize[i] = MEMBER_SIZE("exception_stacks", "DB_stack");
+				ms->stkinfo.esize[i] = MEMBER_SIZE(exc_stack_struct_name, "DB_stack");
 			else if (STREQ(ms->stkinfo.exception_stacks[i], "NMI"))
-				ms->stkinfo.esize[i] = MEMBER_SIZE("exception_stacks", "NMI_stack");
+				ms->stkinfo.esize[i] = MEMBER_SIZE(exc_stack_struct_name, "NMI_stack");
 			else if (STREQ(ms->stkinfo.exception_stacks[i], "DOUBLEFAULT"))
-				ms->stkinfo.esize[i] = MEMBER_SIZE("exception_stacks", "DF_stack");
+				ms->stkinfo.esize[i] = MEMBER_SIZE(exc_stack_struct_name, "DF_stack");
 			else if (STREQ(ms->stkinfo.exception_stacks[i], "MCE"))
-				ms->stkinfo.esize[i] = MEMBER_SIZE("exception_stacks", "MCE_stack");
+				ms->stkinfo.esize[i] = MEMBER_SIZE(exc_stack_struct_name, "MCE_stack");
+			else if (STREQ(ms->stkinfo.exception_stacks[i], "VC"))
+				ms->stkinfo.esize[i] = MEMBER_SIZE(exc_stack_struct_name, "VC_stack");
 		}
 		/*
-	 	 *  Adjust the top-of-stack addresses down to the base stack address.
+		 *  Adjust the top-of-stack addresses down to the base stack address
+		 *  and set stack page availabilituy flag.
 		 */
 		for (c = 0; c < kt->cpus; c++) {
 			for (i = 0; i < MAX_EXCEPTION_STACKS; i++) {
-				if (ms->stkinfo.ebase[c][i] == 0) 
-					continue;
-				ms->stkinfo.ebase[c][i] -= ms->stkinfo.esize[i];
+				if (ms->stkinfo.ebase[c][i])
+					ms->stkinfo.ebase[c][i] -= ms->stkinfo.esize[i];
+
+				ms->stkinfo.available[c][i] = TRUE;
+				/* VC stack can be unmapped if SEV-ES is disabled or not supported. */
+				if (STREQ(ms->stkinfo.exception_stacks[i], "VC") &&
+				    !accessible(ms->stkinfo.ebase[c][i]))
+					ms->stkinfo.available[c][i] = FALSE;
 			}
 		}
 
@@ -1485,6 +1505,7 @@ x86_64_ist_init(void)
 			else
 				ms->stkinfo.esize[i] = esize;
 			ms->stkinfo.ebase[c][i] -= ms->stkinfo.esize[i];
+			ms->stkinfo.available[c][i] = TRUE;
 		}
 	}
 
@@ -2840,7 +2861,8 @@ x86_64_eframe_search(struct bt_info *bt)
 			    !(NUM_IN_BITMAP(bt->cpumask, c)))
 				continue;
                 	for (i = 0; i < MAX_EXCEPTION_STACKS; i++) {
-                        	if (ms->stkinfo.ebase[c][i] == 0)
+				if (ms->stkinfo.ebase[c][i] == 0 ||
+				    !ms->stkinfo.available[c][i])
                                 	break;
                                 bt->hp->esp = ms->stkinfo.ebase[c][i];
                                 fprintf(fp, "CPU %d %s EXCEPTION STACK:",
@@ -3286,7 +3308,8 @@ x86_64_in_exception_stack(struct bt_info *bt, int *estack_index)
 
         for (c = 0; !estack && (c < kt->cpus); c++) {
 		for (i = 0; i < MAX_EXCEPTION_STACKS; i++) {
-			if (ms->stkinfo.ebase[c][i] == 0)
+			if (ms->stkinfo.ebase[c][i] == 0 ||
+			    !ms->stkinfo.available[c][i])
 				break;
 			if ((rsp >= ms->stkinfo.ebase[c][i]) &&
 			    (rsp < (ms->stkinfo.ebase[c][i] + 
@@ -4412,15 +4435,20 @@ x86_64_exception_frame(ulong flags, ulong kvaddr, char *local,
         long r8, r9, r10, r11, r12, r13, r14, r15;
 	struct machine_specific *ms;
 	struct syment *sp;
-	ulong offset;
+	ulong offset, verify_addr;
 	char *pt_regs_buf;
 	long verified;
 	long err;
 	char buf[BUFSIZE];
 
-	if (flags == EFRAME_VERIFY) {
-		if (!accessible(kvaddr) || 
-		    !accessible(kvaddr + SIZE(pt_regs) - sizeof(long)))
+	if (flags & EFRAME_VERIFY) {
+		if (kvaddr)
+			verify_addr = kvaddr;
+		else
+			verify_addr = (local - bt->stackbuf) + bt->stackbase;
+
+		if (!accessible(verify_addr) ||
+		    !accessible(verify_addr + SIZE(pt_regs) - sizeof(long)))
 			return FALSE;
 	}
 
@@ -5090,7 +5118,7 @@ skip_stage:
                 	ms->stkinfo.esize[estack];
 		console("x86_64_get_dumpfile_stack_frame: searching %s estack at %lx\n", 
 			ms->stkinfo.exception_stacks[estack], bt->stackbase);
-		if (!(bt->stackbase)) 
+		if (!(bt->stackbase && ms->stkinfo.available[bt->tc->processor][estack]))
 			goto skip_stage;
 		bt->stackbuf = ms->irqstack;
 		alter_stackbuf(bt);
@@ -5373,6 +5401,8 @@ x86_64_exception_stacks_init(void)
 				ms->stkinfo.exception_stacks[ist-1] = "DOUBLEFAULT";
 			if (strstr(buf, "machine"))
 				ms->stkinfo.exception_stacks[ist-1] = "MCE";
+			if (strstr(buf, "vmm"))
+				ms->stkinfo.exception_stacks[ist-1] = "VC";
 		}
 	}
 
@@ -5729,6 +5759,9 @@ x86_64_display_machine_stats(void)
 
 			fprintf(fp, "%22s: %016lx",
 				buf, machdep->machspec->stkinfo.ebase[c][i]);
+
+			if (!machdep->machspec->stkinfo.available[c][i])
+				fprintf(fp, " [unavailable]");
 
 			if (hide_offline_cpu(c))
 				fprintf(fp, " [OFFLINE]\n");

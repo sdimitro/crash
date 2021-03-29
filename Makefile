@@ -61,6 +61,7 @@ VMWARE_HFILES=vmware_vmss.h
 
 CFILES=main.c tools.c global_data.c memory.c filesys.c help.c task.c \
 	kernel.c test.c gdb_interface.c configure.c net.c dev.c bpf.c \
+	printk.c \
 	alpha.c x86.c ppc.c ia64.c s390.c s390x.c s390dbf.c ppc64.c x86_64.c \
 	arm.c arm64.c mips.c sparc64.c \
 	extensions.c remote.c va_server.c va_server_v1.c symbols.c cmdline.c \
@@ -70,7 +71,7 @@ CFILES=main.c tools.c global_data.c memory.c filesys.c help.c task.c \
 	unwind_x86_32_64.c unwind_arm.c \
 	xen_hyper.c xen_hyper_command.c xen_hyper_global_data.c \
 	xen_hyper_dump_tables.c kvmdump.c qemu.c qemu-load.c sadump.c ipcs.c \
-	ramdump.c vmware_vmss.c \
+	ramdump.c vmware_vmss.c vmware_guestdump.c \
 	xen_dom0.c kaslr_helper.c
 
 SOURCE_FILES=${CFILES} ${GENERIC_HFILES} ${MCORE_HFILES} \
@@ -80,6 +81,7 @@ SOURCE_FILES=${CFILES} ${GENERIC_HFILES} ${MCORE_HFILES} \
 
 OBJECT_FILES=main.o tools.o global_data.o memory.o filesys.o help.o task.o \
 	build_data.o kernel.o test.o gdb_interface.o net.o dev.o bpf.o \
+	printk.o \
 	alpha.o x86.o ppc.o ia64.o s390.o s390x.o s390dbf.o ppc64.o x86_64.o \
 	arm.o arm64.o mips.o sparc64.o \
 	extensions.o remote.o va_server.o va_server_v1.o symbols.o cmdline.o \
@@ -89,7 +91,7 @@ OBJECT_FILES=main.o tools.o global_data.o memory.o filesys.o help.o task.o \
 	unwind_x86_32_64.o unwind_arm.o \
 	xen_hyper.o xen_hyper_command.o xen_hyper_global_data.o \
 	xen_hyper_dump_tables.o kvmdump.o qemu.o qemu-load.o sadump.o ipcs.o \
-	ramdump.o vmware_vmss.o \
+	ramdump.o vmware_vmss.o vmware_guestdump.o \
 	xen_dom0.o kaslr_helper.o
 
 MEMORY_DRIVER_FILES=memory_driver/Makefile memory_driver/crash.c memory_driver/README
@@ -256,8 +258,9 @@ gdb_unzip:
 	@if [ ! -f ${GDB}.tar.gz ] && [ ! -f /usr/bin/wget ]; then \
 	  echo /usr/bin/wget is required to download ${GDB}.tar.gz; echo; exit 1; fi
 	@if [ ! -f ${GDB}.tar.gz ] && [ -f /usr/bin/wget ]; then \
-	  wget http://ftp.gnu.org/gnu/gdb/${GDB}.tar.gz; fi
-	@tar --exclude-from gdb.files -xvzmf ${GDB}.tar.gz
+	  [ ! -t 2 ] && WGET_OPTS="--progress=dot:mega"; \
+	  wget $$WGET_OPTS http://ftp.gnu.org/gnu/gdb/${GDB}.tar.gz; fi
+	@tar --exclude-from gdb.files -xzmf ${GDB}.tar.gz
 	@make --no-print-directory gdb_patch
 
 gdb_patch:
@@ -330,6 +333,10 @@ snappy: make_configure
 	@./configure -x snappy ${CONF_TARGET_FLAG} -w -b
 	@make --no-print-directory gdb_merge
 
+valgrind: make_configure
+	@./configure -x valgrind ${CONF_TARGET_FLAG} -w -b
+	@make --no-print-directory gdb_merge
+
 main.o: ${GENERIC_HFILES} main.c
 	${CC} -c ${CRASH_CFLAGS} main.c ${WARNING_OPTIONS} ${WARNING_ERROR} 
 
@@ -362,6 +369,9 @@ task.o: ${GENERIC_HFILES} task.c
 
 kernel.o: ${GENERIC_HFILES} kernel.c
 	${CC} -c ${CRASH_CFLAGS} kernel.c ${WARNING_OPTIONS} ${WARNING_ERROR}
+
+printk.o: ${GENERIC_HFILES} printk.c
+	${CC} -c ${CRASH_CFLAGS} printk.c ${WARNING_OPTIONS} ${WARNING_ERROR}
 
 gdb_interface.o: ${GENERIC_HFILES} gdb_interface.c
 	${CC} -c ${CRASH_CFLAGS} gdb_interface.c ${WARNING_OPTIONS} ${WARNING_ERROR}
@@ -517,6 +527,9 @@ ramdump.o: ${GENERIC_HFILES} ${REDHAT_HFILES} ramdump.c
 
 vmware_vmss.o: ${GENERIC_HFILES} ${VMWARE_HFILES} vmware_vmss.c
 	${CC} -c ${CRASH_CFLAGS} vmware_vmss.c ${WARNING_OPTIONS} ${WARNING_ERROR}
+
+vmware_guestdump.o: ${GENERIC_HFILES} ${VMWARE_HFILES} vmware_guestdump.c
+	${CC} -c ${CRASH_CFLAGS} vmware_guestdump.c ${WARNING_OPTIONS} ${WARNING_ERROR}
 
 kaslr_helper.o: ${GENERIC_HFILES} kaslr_helper.c
 	${CC} -c ${CRASH_CFLAGS} kaslr_helper.c ${WARNING_OPTIONS} ${WARNING_ERROR}

@@ -544,6 +544,7 @@ struct program_context {
 #define is_excluded_vmemmap() (pc->flags2 & EXCLUDED_VMEMMAP)
 #define MEMSRC_LOCAL         (0x80000ULL)
 #define REDZONE             (0x100000ULL)
+#define VMWARE_VMSS_GUESTDUMP (0x200000ULL)
 	char *cleanup;
 	char *namelist_orig;
 	char *namelist_debug_orig;
@@ -2100,6 +2101,35 @@ struct offset_table {                    /* stash of commonly-used offsets */
 	long module_module_core_rx;
 	long module_module_init_rw;
 	long module_module_init_rx;
+	long super_block_s_inodes;
+	long inode_i_sb_list;
+	long irq_common_data_affinity;
+	long irq_desc_irq_common_data;
+	long uts_namespace_name;
+	long printk_info_seq;
+	long printk_info_ts_nsec;
+	long printk_info_text_len;
+	long printk_info_level;
+	long printk_info_caller_id;
+	long printk_info_dev_info;
+	long dev_printk_info_subsystem;
+	long dev_printk_info_device;
+	long prb_desc_ring;
+	long prb_text_data_ring;
+	long prb_desc_ring_count_bits;
+	long prb_desc_ring_descs;
+	long prb_desc_ring_infos;
+	long prb_desc_ring_head_id;
+	long prb_desc_ring_tail_id;
+	long prb_desc_state_var;
+	long prb_desc_text_blk_lpos;
+	long prb_data_blk_lpos_begin;
+	long prb_data_blk_lpos_next;
+	long prb_data_ring_size_bits;
+	long prb_data_ring_data;
+	long atomic_long_t_counter;
+	long block_device_bd_device;
+	long block_device_bd_stats;
 };
 
 struct size_table {         /* stash of commonly-used sizes */
@@ -2258,6 +2288,10 @@ struct size_table {         /* stash of commonly-used sizes */
 	long xarray;
 	long xa_node;
 	long zram_table_entry;
+	long irq_common_data;
+	long printk_info;
+	long printk_ringbuffer;
+	long prb_desc;
 };
 
 struct array_table {
@@ -3551,7 +3585,7 @@ struct arm64_stackframe {
  *  PHYSICAL_PAGE_MASK changed (enlarged) between 2.4 and 2.6, so
  *  for safety, use the 2.6 values to generate it.
  */ 
-#define __PHYSICAL_MASK_SHIFT_XEN     40
+#define __PHYSICAL_MASK_SHIFT_XEN     52
 #define __PHYSICAL_MASK_SHIFT_2_6     46
 #define __PHYSICAL_MASK_SHIFT_5LEVEL  52
 #define __PHYSICAL_MASK_SHIFT  (machdep->machspec->physical_mask_shift)
@@ -5109,6 +5143,7 @@ char *strdupbuf(char *);
 void sigsetup(int, void *, struct sigaction *, struct sigaction *);
 #define SIGACTION(s, h, a, o) sigsetup(s, h, a, o)
 char *convert_time(ulonglong, char *);
+char *ctime_tz(time_t *);
 void stall(ulong);
 char *pages_to_size(ulong, char *);
 int clean_arg(void);
@@ -5592,6 +5627,7 @@ void clone_bt_info(struct bt_info *, struct bt_info *, struct task_context *);
 void dump_kernel_table(int);
 void dump_bt_info(struct bt_info *, char *where);
 void dump_log(int);
+#define LOG_LEVEL(v) ((v) & 0x07)
 #define SHOW_LOG_LEVEL (0x1)
 #define SHOW_LOG_DICT  (0x2)
 #define SHOW_LOG_TEXT  (0x4)
@@ -5905,6 +5941,7 @@ struct x86_64_pt_regs_offsets {
 struct x86_64_stkinfo {
 	ulong ebase[NR_CPUS][MAX_EXCEPTION_STACKS];
 	int esize[MAX_EXCEPTION_STACKS];
+	char available[NR_CPUS][MAX_EXCEPTION_STACKS];
 	ulong ibase[NR_CPUS];
 	int isize;
 	int NMI_stack_index;
@@ -6449,6 +6486,7 @@ void display_ELF_note(int, int, void *, FILE *);
 void *netdump_get_prstatus_percpu(int);
 int kdump_kaslr_check(void);
 void display_vmcoredd_note(void *ptr, FILE *ofp);
+int kdump_get_nr_cpus(void);
 QEMUCPUState *kdump_get_qemucpustate(int);
 void kdump_device_dump_info(FILE *);
 void kdump_device_dump_extract(int, char *, FILE *);
@@ -6497,6 +6535,7 @@ void process_elf32_notes(void *, ulong);
 void process_elf64_notes(void *, ulong);
 void dump_registers_for_compressed_kdump(void);
 int diskdump_kaslr_check(void);
+int diskdump_get_nr_cpus(void);
 QEMUCPUState *diskdump_get_qemucpustate(int);
 void diskdump_device_dump_info(FILE *);
 void diskdump_device_dump_extract(int, char *, FILE *);
@@ -6615,7 +6654,8 @@ void sadump_unset_zero_excluded(void);
 struct sadump_data;
 struct sadump_data *get_sadump_data(void);
 int sadump_calc_kaslr_offset(ulong *);
-int sadump_get_cr3_idtr(ulong *, ulong *);
+int sadump_get_nr_cpus(void);
+int sadump_get_cr3_cr4_idtr(int, ulong *, ulong *, ulong *);
 
 /*
  * qemu.c
@@ -6668,14 +6708,27 @@ void get_vmware_vmss_regs(struct bt_info *, ulong *, ulong *);
 int vmware_vmss_memory_dump(FILE *);
 void dump_registers_for_vmss_dump(void);
 int vmware_vmss_valid_regs(struct bt_info *);
-int vmware_vmss_get_cr3_idtr(ulong *, ulong *);
+int vmware_vmss_get_nr_cpus(void);
+int vmware_vmss_get_cr3_cr4_idtr(int, ulong *, ulong *, ulong *);
 int vmware_vmss_phys_base(ulong *phys_base);
 int vmware_vmss_set_phys_base(ulong);
+
+/*
+ * vmware_guestdump.c
+ */
+int is_vmware_guestdump(char *filename);
+int vmware_guestdump_init(char *filename, FILE *ofp);
+int vmware_guestdump_memory_dump(FILE *);
 
 /*
  * kaslr_helper.c
  */
 int calc_kaslr_offset(ulong *, ulong *);
+
+/*
+ * printk.c
+ */
+void dump_lockless_record_log(int);
 
 /*
  *  gnu_binutils.c

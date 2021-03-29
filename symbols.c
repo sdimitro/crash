@@ -634,8 +634,11 @@ kaslr_init(void)
 		}
 	}
 
-	if (SADUMP_DUMPFILE() || VMSS_DUMPFILE())
+	if (SADUMP_DUMPFILE() || QEMU_MEM_DUMP_NO_VMCOREINFO() || VMSS_DUMPFILE()) {
+		/* Need for kaslr_offset and phys_base */
 		kt->flags2 |= KASLR_CHECK;
+		st->_stext_vmlinux = UNINITIALIZED;
+	}
 }
 
 /*
@@ -3868,7 +3871,8 @@ is_shared_object(char *file)
 			break;
 
 		case EM_X86_64:
-			if (machine_type("X86_64") || machine_type("ARM64")) 
+			if (machine_type("X86_64") || machine_type("ARM64") ||
+			    machine_type("PPC64"))
 				return TRUE;
 			break;
 
@@ -5607,7 +5611,7 @@ datatype_init(void)
 long
 datatype_info(char *name, char *member, struct datatype_member *dm)
 {
-	struct gnu_request *req;
+	struct gnu_request request, *req = &request;
 	long offset, size, member_size;
 	int member_typecode;
 	ulong type_found;
@@ -5621,7 +5625,7 @@ datatype_info(char *name, char *member, struct datatype_member *dm)
 
 	strcpy(buf, name);
 
-	req = (struct gnu_request *)GETBUF(sizeof(struct gnu_request));
+	BZERO(req, sizeof(*req));
 	req->command = GNU_GET_DATATYPE;
 	req->flags |= GNU_RETURN_ON_ERROR;
 	req->name = buf;
@@ -5629,10 +5633,8 @@ datatype_info(char *name, char *member, struct datatype_member *dm)
 	req->fp = pc->nullfp;
 
 	gdb_interface(req);
-	if (req->flags & GNU_COMMAND_FAILED) {
-		FREEBUF(req);
+	if (req->flags & GNU_COMMAND_FAILED)
 		return (dm == MEMBER_TYPE_NAME_REQUEST) ? 0 : -1;
-	}
 
 	if (!req->typecode) {
 		sprintf(buf, "struct %s", name);
@@ -5743,8 +5745,6 @@ datatype_info(char *name, char *member, struct datatype_member *dm)
 		offset = -1;
 		break;
 	}
-
-	FREEBUF(req);
 
         if (dm && (dm != MEMBER_SIZE_REQUEST) && (dm != MEMBER_TYPE_REQUEST) &&
 	    (dm != STRUCT_SIZE_REQUEST) && (dm != MEMBER_TYPE_NAME_REQUEST)) {
@@ -7918,7 +7918,8 @@ parse_for_member(struct datatype_member *dm, ulong flag)
 		sprintf(lookfor2, "  %s[", s);
 next_item:
 		while (fgets(buf, BUFSIZE, pc->tmpfile)) {
-			if (embed && (count_leading_spaces(buf) == embed))
+			if ((embed && (count_leading_spaces(buf) == embed)) ||
+				(strstr(buf, "}}") && embed == count_leading_spaces(buf) - 2))
 				embed = 0;
 
 			if (!on && !embed && strstr(buf, "= {") && !strstr(buf, lookfor1))
@@ -7938,6 +7939,11 @@ next_item:
 			if (on) {
 				if ((indent && (on > 1) && (count_leading_spaces(buf) == indent) &&
 				    !strstr(buf, "}")) || (buf[0] == '}')) {
+					break;
+				}
+				if (indent && (on > 1) && indent == count_leading_spaces(buf) - 2 &&
+					strstr(buf, "}}")) {
+					fprintf(pc->saved_fp, "%s", buf);
 					break;
 				}
 				if (!indent) {
@@ -9287,6 +9293,10 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(block_device_bd_list));
 	fprintf(fp, "          block_device_bd_disk: %ld\n",
 		OFFSET(block_device_bd_disk));
+	fprintf(fp, "        block_device_bd_device: %ld\n",
+		OFFSET(block_device_bd_device));
+	fprintf(fp, "         block_device_bd_stats: %ld\n",
+		OFFSET(block_device_bd_stats));
 	fprintf(fp, "         address_space_nrpages: %ld\n",
 		OFFSET(address_space_nrpages));
 	fprintf(fp, "       address_space_page_tree: %ld\n",
@@ -9326,8 +9336,12 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(irq_data_chip));
 	fprintf(fp, "             irq_data_affinity: %ld\n",
 		OFFSET(irq_data_affinity));
+	fprintf(fp, "      irq_common_data_affinity: %ld\n",
+		OFFSET(irq_common_data_affinity));
 	fprintf(fp, "             irq_desc_irq_data: %ld\n",
 		OFFSET(irq_desc_irq_data));
+	fprintf(fp, "      irq_desc_irq_common_data: %ld\n",
+		OFFSET(irq_desc_irq_common_data));
 	fprintf(fp, "              kernel_stat_irqs: %ld\n",
 		OFFSET(kernel_stat_irqs));
 
@@ -9468,6 +9482,8 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(inode_i_fop)); 
 	fprintf(fp, "               inode_i_mapping: %ld\n",
 		OFFSET(inode_i_mapping));
+	fprintf(fp, "               inode_i_sb_list: %ld\n",
+		OFFSET(inode_i_sb_list));
 
         fprintf(fp, "             vfsmount_mnt_next: %ld\n", 
 		OFFSET(vfsmount_mnt_next));
@@ -9504,6 +9520,8 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(super_block_s_type));
         fprintf(fp, "           super_block_s_files: %ld\n", 
 		OFFSET(super_block_s_files));
+	fprintf(fp, "          super_block_s_inodes: %ld\n",
+		OFFSET(super_block_s_inodes));
 
 	fprintf(fp, "               nlm_file_f_file: %ld\n",
 		OFFSET(nlm_file_f_file));
@@ -10414,6 +10432,30 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(log_level));
 	fprintf(fp, "               log_flags_level: %ld\n",
 		OFFSET(log_flags_level));
+
+	fprintf(fp, "               printk_info_seq: %ld\n", OFFSET(printk_info_seq));
+	fprintf(fp, "           printk_info_ts_nseq: %ld\n", OFFSET(printk_info_ts_nsec));
+	fprintf(fp, "          printk_info_text_len: %ld\n", OFFSET(printk_info_text_len));
+	fprintf(fp, "             printk_info_level: %ld\n", OFFSET(printk_info_level));
+	fprintf(fp, "         printk_info_caller_id: %ld\n", OFFSET(printk_info_caller_id));
+	fprintf(fp, "          printk_info_dev_info: %ld\n", OFFSET(printk_info_dev_info));
+	fprintf(fp, "     dev_printk_info_subsystem: %ld\n", OFFSET(dev_printk_info_subsystem));
+	fprintf(fp, "        dev_printk_info_device: %ld\n", OFFSET(dev_printk_info_device));
+	fprintf(fp, "                 prb_desc_ring: %ld\n", OFFSET(prb_desc_ring));
+	fprintf(fp, "            prb_text_data_ring: %ld\n", OFFSET(prb_text_data_ring));
+	fprintf(fp, "      prb_desc_ring_count_bits: %ld\n", OFFSET(prb_desc_ring_count_bits));
+	fprintf(fp, "           prb_desc_ring_descs: %ld\n", OFFSET(prb_desc_ring_descs));
+	fprintf(fp, "           prb_desc_ring_infos: %ld\n", OFFSET(prb_desc_ring_infos));
+	fprintf(fp, "         prb_desc_ring_head_id: %ld\n", OFFSET(prb_desc_ring_head_id));
+	fprintf(fp, "         prb_desc_ring_tail_id: %ld\n", OFFSET(prb_desc_ring_tail_id));
+	fprintf(fp, "            prb_desc_state_var: %ld\n", OFFSET(prb_desc_state_var));
+	fprintf(fp, "        prb_desc_text_blk_lpos: %ld\n", OFFSET(prb_desc_text_blk_lpos));
+	fprintf(fp, "       prb_data_blk_lpos_begin: %ld\n", OFFSET(prb_data_blk_lpos_begin));
+	fprintf(fp, "        prb_data_blk_lpos_next: %ld\n", OFFSET(prb_data_blk_lpos_next));
+	fprintf(fp, "       prb_data_ring_size_bits: %ld\n", OFFSET(prb_data_ring_size_bits));
+	fprintf(fp, "            prb_data_ring_data: %ld\n", OFFSET(prb_data_ring_data));
+	fprintf(fp, "         atomit_long_t_counter: %ld\n", OFFSET(atomic_long_t_counter));
+
 	fprintf(fp, "          sched_rt_entity_my_q: %ld\n",
 		OFFSET(sched_rt_entity_my_q));
 	fprintf(fp, "             task_group_parent: %ld\n",
@@ -10577,6 +10619,9 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "                 xa_node_shift: %ld\n",
 		OFFSET(xa_node_shift));
 
+	fprintf(fp, "            uts_namespace_name: %ld\n",
+		OFFSET(uts_namespace_name));
+
 	fprintf(fp, "\n                    size_table:\n");
 	fprintf(fp, "                          page: %ld\n", SIZE(page));
 	fprintf(fp, "                    page_flags: %ld\n", SIZE(page_flags));
@@ -10679,6 +10724,7 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "                      runqueue: %ld\n", SIZE(runqueue));
 	fprintf(fp, "                    irq_desc_t: %ld\n", SIZE(irq_desc_t));
 	fprintf(fp, "                      irq_data: %ld\n", SIZE(irq_data));
+	fprintf(fp, "               irq_common_data: %ld\n", SIZE(irq_common_data));
 	fprintf(fp, "                    task_union: %ld\n", SIZE(task_union));
 	fprintf(fp, "                  thread_union: %ld\n", SIZE(thread_union));
 	fprintf(fp, "                    prio_array: %ld\n", SIZE(prio_array));
@@ -10834,6 +10880,9 @@ dump_offset_table(char *spec, ulong makestruct)
 		SIZE(xarray));
 	fprintf(fp, "                       xa_node: %ld\n",
 		SIZE(xa_node));
+	fprintf(fp, "                   printk_info: %ld\n", SIZE(printk_info));
+	fprintf(fp, "             printk_ringbuffer: %ld\n", SIZE(printk_ringbuffer));
+	fprintf(fp, "                      prb_desc: %ld\n", SIZE(prb_desc));
 
 
         fprintf(fp, "\n                   array_table:\n");
@@ -12698,9 +12747,11 @@ numeric_forward(const void *P_x, const void *P_y)
 
 	if (SADUMP_DUMPFILE() || QEMU_MEM_DUMP_NO_VMCOREINFO() || VMSS_DUMPFILE()) {
 		/* Need for kaslr_offset and phys_base */
-		if (STREQ(x->name, "divide_error"))
+		if (STREQ(x->name, "divide_error") ||
+		    STREQ(x->name, "asm_exc_divide_error"))
 			st->divide_error_vmlinux = valueof(x);
-		else if (STREQ(y->name, "divide_error"))
+		else if (STREQ(y->name, "divide_error") ||
+			 STREQ(y->name, "asm_exc_divide_error"))
 			st->divide_error_vmlinux = valueof(y);
 
 		if (STREQ(x->name, "idt_table"))
